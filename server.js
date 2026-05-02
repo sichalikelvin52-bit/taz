@@ -23,7 +23,7 @@ const DB_PATH = path.join(__dirname, 'data', 'taz_db.json');
 const LOG_PATH= path.join(__dirname, 'data', 'taz_log.ndjson');
 const SECRET  = process.env.JWT_SECRET || 'taz-furnitures-secret-2024-mzuzu';
 const TOKEN_TTL = 8 * 60 * 60 * 1000; // 8 hours
-const ACCESS_KEY = process.env.API_KEY || 'taz-access-key';
+const ACCESS_KEY = process.env.API_KEY || 'mysecret123';
 
 if (!process.env.API_KEY) {
   console.warn('[SECURITY] API_KEY is not set. Using default key taz-access-key for local use. Set API_KEY in environment for production.');
