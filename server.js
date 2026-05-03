@@ -171,22 +171,44 @@ function nextId(prefix, arr) {
 // ─────────────────────────────────────────────
 // MINI JWT (HMAC-SHA256, no external lib)
 // ─────────────────────────────────────────────
+function toBase64Url(str) {
+  return Buffer.from(str).toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '');
+}
+
+function fromBase64Url(str) {
+  // Add padding if needed
+  const padded = str + '==='.slice(0, (4 - (str.length % 4)) % 4);
+  return Buffer.from(padded.replace(/-/g, '+').replace(/_/g, '/'), 'base64').toString();
+}
+
 function signToken(payload) {
-  const header  = Buffer.from(JSON.stringify({ alg:'HS256', typ:'JWT' })).toString('base64url');
-  const body    = Buffer.from(JSON.stringify(payload)).toString('base64url');
-  const sig     = crypto.createHmac('sha256', SECRET).update(`${header}.${body}`).digest('base64url');
+  const header  = toBase64Url(JSON.stringify({ alg:'HS256', typ:'JWT' }));
+  const body    = toBase64Url(JSON.stringify(payload));
+  const sig     = toBase64Url(crypto.createHmac('sha256', SECRET).update(`${header}.${body}`).digest());
   return `${header}.${body}.${sig}`;
 }
 
 function verifyToken(token) {
   try {
-    const [h, b, s] = token.split('.');
-    const expected = crypto.createHmac('sha256', SECRET).update(`${h}.${b}`).digest('base64url');
-    if (s !== expected) return null;
-    const payload = JSON.parse(Buffer.from(b, 'base64url').toString());
-    if (payload.exp < Date.now()) return null;
+    const parts = token.split('.');
+    if (parts.length !== 3) return null;
+    const [h, b, s] = parts;
+    if (!h || !b || !s) return null;
+    const expected = toBase64Url(crypto.createHmac('sha256', SECRET).update(`${h}.${b}`).digest());
+    if (s !== expected) {
+      console.warn('[AUTH] Token signature mismatch');
+      return null;
+    }
+    const payload = JSON.parse(fromBase64Url(b));
+    if (payload.exp <= Date.now()) {
+      console.warn('[AUTH] Token expired:', new Date(payload.exp));
+      return null;
+    }
     return payload;
-  } catch { return null; }
+  } catch (e) { 
+    console.warn('[AUTH] Token verification error:', e.message);
+    return null; 
+  }
 }
 
 // ─────────────────────────────────────────────
@@ -228,9 +250,19 @@ function getToken(req) {
 
 function requireAuth(req, res) {
   const token = getToken(req);
-  if (!token) { err(res, 401, 'No token provided'); return null; }
+  if (!token) { 
+    console.warn('[AUTH] No token provided in request');
+    err(res, 401, 'No token provided'); 
+    return null; 
+  }
+  console.log('[AUTH] Verifying token:', token.substring(0, 20) + '...');
   const payload = verifyToken(token);
-  if (!payload) { err(res, 401, 'Invalid or expired token'); return null; }
+  if (!payload) { 
+    console.warn('[AUTH] Token verification failed');
+    err(res, 401, 'Invalid or expired token'); 
+    return null; 
+  }
+  console.log('[AUTH] Token valid for role:', payload.role);
   return payload;
 }
 
@@ -277,17 +309,22 @@ async function router(req, res) {
         if (!pin) return err(res, 400, 'PIN required');
         const hashed = hashPin(String(pin));
         let role = null;
+        console.log('[LOGIN] Attempting with PIN:', String(pin), 'Hashed:', hashed.substring(0, 8) + '...');
+        console.log('[LOGIN] Owner PIN hash:', DB.settings.pin_owner.substring(0, 8) + '...');
+        console.log('[LOGIN] Cashier PIN hash:', DB.settings.pin_cashier.substring(0, 8) + '...');
         if (hashed === DB.settings.pin_owner) {
           role = 'owner';
         } else if (hashed === DB.settings.pin_cashier) {
           role = 'cashier';
         }
         if (!role) {
+          console.log('[LOGIN] PIN incorrect - no match');
           audit('LOGIN_FAIL', 'auth', null, { ip });
           return err(res, 401, 'Incorrect PIN');
         }
         const exp = Date.now() + TOKEN_TTL;
         const token = signToken({ sub: role, role, exp, iss: 'taz-backend' });
+        console.log('[LOGIN] Token created for role:', role, 'Expires:', new Date(exp));
         DB.sessions[token] = { expires: exp, ip, role };
         saveDB();
         audit('LOGIN', 'auth', role, { ip });
@@ -322,6 +359,11 @@ async function router(req, res) {
       }
 
       return err(res, 404, 'Auth endpoint not found');
+    }
+
+    // ── HEALTH CHECK (API key only, no JWT required)
+    if (parts[0] === 'health' && method === 'GET') {
+      return ok(res, { status: 'ok', version: '2.4', uptime: process.uptime(), orders: DB.orders.length, ts: new Date().toISOString() });
     }
 
     // ── ALL ROUTES BELOW REQUIRE AUTH ─────────────────
